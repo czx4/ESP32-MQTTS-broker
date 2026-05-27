@@ -3,6 +3,20 @@
 static constexpr const char *TAG = "main";
 constexpr static uint32_t TASK_SIZE = 10 * 1024;
 
+QueueHandle_t pending_socks,socks_for_fds;
+
+void error_check(int &error_count,const char ptr[])
+{
+    constexpr std::size_t MAX_ERRORS_BEFORE_RESTART = 10;
+    if (error_count >= MAX_ERRORS_BEFORE_RESTART)
+    {
+        ESP_LOGW(TAG, "Reached max error tries while %s", ptr);
+        esp_restart();
+    }
+    else
+        error_count = 0;
+}
+
 static void tcp_server_task(void *pvParameters)
 {
     constexpr std::size_t MAX_ERRORS_BEFORE_RESTART = 10;
@@ -16,13 +30,7 @@ static void tcp_server_task(void *pvParameters)
     // int keepInterval = KEEPALIVE_INTERVAL;
     // int keepCount = KEEPALIVE_COUNT;
     struct sockaddr_storage dest_addr;
-    esp_tls_cfg_server tls_cfg{};
-    tls_cfg.cacert_buf = NULL;
-    tls_cfg.cacert_bytes = 0;
-    tls_cfg.servercert_buf = pem_cert;
-    tls_cfg.servercert_bytes = sizeof(pem_cert);
-    tls_cfg.serverkey_buf = pem_prv_key;
-    tls_cfg.serverkey_bytes = sizeof(pem_prv_key);
+    
 
 #ifdef CONFIG_EXAMPLE_IPV4
     if (addr_family == AF_INET)
@@ -43,13 +51,26 @@ static void tcp_server_task(void *pvParameters)
         vTaskDelay(TIME_BETWEEN_TRIES_AFTER_ERROR / portTICK_PERIOD_MS);
         listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
     }
-    if (error_count >= MAX_ERRORS_BEFORE_RESTART)
+    error_check(error_count, "creating socket");
+
+    int flags = fcntl(listen_sock, F_GETFL);
+    while (flags == -1 && error_count < MAX_ERRORS_BEFORE_RESTART)
     {
-        ESP_LOGW(TAG, "Reached max tries of creating socket before restart");
-        esp_restart();
+        ESP_LOGE(TAG, "error in getting socket flags");
+        ++error_count;
+        vTaskDelay(TIME_BETWEEN_TRIES_AFTER_ERROR / portTICK_PERIOD_MS);
+        flags = fcntl(listen_sock, F_GETFL);
     }
-    else
-        error_count = 0;
+    error_check(error_count, "getting socket flags");
+
+    while (fcntl(listen_sock, F_SETFL, flags | O_NONBLOCK) == -1 && error_count < MAX_ERRORS_BEFORE_RESTART)
+    {
+        ESP_LOGE(TAG, "error in setting socket flags");
+        ++error_count;
+        vTaskDelay(TIME_BETWEEN_TRIES_AFTER_ERROR / portTICK_PERIOD_MS);
+    }
+    error_check(error_count, "setting socket flags");
+
     int opt = 1;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -64,13 +85,7 @@ static void tcp_server_task(void *pvParameters)
         vTaskDelay(TIME_BETWEEN_TRIES_AFTER_ERROR / portTICK_PERIOD_MS);
         err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     }
-    if (error_count >= MAX_ERRORS_BEFORE_RESTART)
-    {
-        ESP_LOGW(TAG, "Reached max tries of binding socket before restart");
-        esp_restart();
-    }
-    else
-        error_count = 0;
+    error_check(error_count, "binding socket");
 
     ESP_LOGI(TAG, "Socket bound, port %d", PORT);
 
@@ -82,66 +97,120 @@ static void tcp_server_task(void *pvParameters)
         vTaskDelay(TIME_BETWEEN_TRIES_AFTER_ERROR / portTICK_PERIOD_MS);
         err = listen(listen_sock, 1);
     }
-    if (error_count >= MAX_ERRORS_BEFORE_RESTART)
-    {
-        ESP_LOGW(TAG, "Reached max tries of trying to listen on socket before restart");
-        esp_restart();
-    }
-    else
-        error_count = 0;
+    error_check(error_count, "listening to socket");
 
+    uint16_t max_socket = listen_sock;
+    fd_set master_readfds;
+    fd_set master_writefds;
+
+    fd_set readfds;
+    fd_set writefds;
+
+    FD_ZERO(&master_readfds);
+    FD_ZERO(&master_writefds);
+    FD_SET(listen_sock, &master_readfds);
     while (true)
     {
-        // TODO: add delay if low on mem to not hog cpu
-        ESP_LOGI(TAG, "Socket listening");
-        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
-        socklen_t addr_len = sizeof(source_addr);
-        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-        if (sock < 0)
+        readfds = master_readfds;
+        writefds = master_writefds;
+        select(max_socket + 1, &readfds, &writefds, NULL, NULL);
+        if (FD_ISSET(listen_sock, &readfds))
         {
-            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            continue;
+            struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
+            socklen_t addr_len = sizeof(source_addr);
+            int new_sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+            if(new_sock>63){
+                ESP_LOGI(TAG,"max socket number reached");
+                closesocket(new_sock);
+            }
+            else if(new_sock!=-1){
+                if(new_sock>max_socket)max_socket=new_sock;
+                message accepted_sock(new_sock,message::operation::write);
+                xQueueSendToBack(pending_socks,&accepted_sock,0);
+            }
+        }
+        for(int sock=0;sock<=max_socket;++sock){
+            if(sock==listen_sock)continue;
+            if(FD_ISSET(sock,&readfds)){
+                message msg(sock,message::operation::read);
+                xQueueSendToBack(pending_socks,&msg,0);
+            }
+            if(FD_ISSET(sock,&writefds)){
+                message msg(sock,message::operation::write);
+                xQueueSendToBack(pending_socks,&msg,0);
+            }
+        }
+        message rec_msg(-1,message::operation::read);
+        while(xQueueReceive(socks_for_fds,&rec_msg,0)==pdPASS){
+            if(rec_msg.op==message::operation::read){
+                FD_SET(rec_msg.socket,&master_readfds);
+            }else if(rec_msg.op==message::operation::write){
+                FD_SET(rec_msg.socket,&master_writefds);
+            }else if(rec_msg.op==message::operation::delread){
+                FD_CLR(rec_msg.socket,&master_readfds);
+            }else if(rec_msg.op==message::operation::delwrite){
+                FD_CLR(rec_msg.socket,&master_writefds);
+            }else if(rec_msg.op==message::operation::delall){
+                FD_CLR(rec_msg.socket,&master_readfds);
+                FD_CLR(rec_msg.socket,&master_writefds);
+            }
         }
 
-        // // Set tcp keepalive option
-        struct timeval initial_timeout;
-        initial_timeout.tv_sec = 60;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &initial_timeout, sizeof(struct timeval));
-        // setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int)); //TODO: organize and delete not used
-        // setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
-        // setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
-        // setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
-        // Convert ip address to string
-        esp_tls_t *tls = esp_tls_init();
-        if (!tls)
-        {
-            ESP_LOGE(TAG, "TLS init allocation failed");
-            closesocket(sock);
-            continue;
-        }
-        if (esp_tls_server_session_create(&tls_cfg, sock, tls) == 0)
-        {
-            ESP_LOGI(TAG, "TLS handshake successful");
-        }
-        else
-        {
-            ESP_LOGE(TAG, "TLS handshake failed");
-            esp_tls_server_session_delete(tls);
-            closesocket(sock);
-            continue;
-        }
-#ifdef CONFIG_EXAMPLE_IPV4
-        if (source_addr.ss_family == PF_INET)
-        {
-            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
-        }
-#endif
 
-        ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
-        char buffer[]="hello world\0";
-        esp_tls_conn_write(tls,buffer,sizeof(buffer));
-        esp_tls_server_session_delete(tls);
-        closesocket(sock);
+//         if (FD_ISSET(listen_sock, &readfds))
+//         {
+//             struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
+//             socklen_t addr_len = sizeof(source_addr);
+//             int new_sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+
+//             tls = esp_tls_init();
+//             if (!tls)
+//             {
+//                 ESP_LOGE(TAG, "TLS init allocation failed");
+//                 closesocket(new_sock);
+//                 continue;
+//             }
+//             if (esp_tls_server_session_create(&tls_cfg, new_sock, tls) == 0)
+//             {
+//                 ESP_LOGI(TAG, "TLS handshake successful");
+//             }
+//             else
+//             {
+//                 ESP_LOGE(TAG, "TLS handshake failed");
+//                 esp_tls_server_session_delete(tls);
+//                 closesocket(new_sock);
+//                 continue;
+//             }
+// #ifdef CONFIG_EXAMPLE_IPV4
+//             if (source_addr.ss_family == PF_INET)
+//             {
+//                 inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+//             }
+// #endif
+
+//             ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+//             char buffer[] = "hello world";
+//             esp_tls_conn_write(tls, buffer, sizeof(buffer));
+//             // esp_tls_server_session_delete(tls);
+//             // closesocket(new_sock);
+//             if (new_sock > max_socket)
+//                 max_socket = new_sock;
+//             FD_SET(new_sock, &master_writefds);
+//         }
+//         for (int i = 0; i <= max_socket; ++i)
+//         { // TODO: move allat to worker thread, implement server session async
+//             if (FD_ISSET(i, &writefds))
+//             {
+//                 char buf[] = "crazy ";
+//                 int code = esp_tls_conn_write(tls, buf, sizeof(buf));
+//                 if (code < 0)
+//                 {
+//                     esp_tls_server_session_delete(tls);
+//                     closesocket(i);
+//                     FD_CLR(i, &master_writefds);
+//                 }
+//             }
+//         }
     }
 }
 
@@ -150,13 +219,15 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
     ESP_ERROR_CHECK(wifi_init_sta());
 #ifdef CONFIG_EXAMPLE_IPV4
+    pending_socks=xQueueCreate(10,sizeof(message));
+    socks_for_fds=xQueueCreate(10,sizeof(message));
+    if(!pending_socks || !socks_for_fds){
+        ESP_LOGW(TAG,"failed to create queue");
+        esp_restart();
+    }
     xTaskCreate(tcp_server_task, "tcp_server", 6 * 1024, (void *)AF_INET, 0, NULL); // TODO: adjust size
+    xTaskCreate(worker,"worker",TASK_SIZE,NULL,0,NULL);
 #endif
 }

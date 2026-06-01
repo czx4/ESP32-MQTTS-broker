@@ -16,9 +16,7 @@ uint8_t Subscription::add_sub(char *topic_ptr, std::size_t len, Subscription *cu
             tmp = alloc();
             if (!tmp)
                 return SUB_ERROR_CODE;
-            std::unique_ptr<Subscription> tmp_uq(tmp);
-
-            cur_node->m_child_nodes.add(topic_ptr, end - topic_ptr, tmp_uq);
+            cur_node->m_child_nodes.add(topic_ptr, end - topic_ptr, std::unique_ptr<Subscription>(tmp));
             tmp = cur_node->m_child_nodes.get(topic_ptr, end - topic_ptr);
             if (!tmp)
                 return SUB_ERROR_CODE;

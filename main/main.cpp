@@ -1,11 +1,11 @@
 #include "main.hpp"
 
 static constexpr const char *TAG = "main";
-constexpr static uint32_t TASK_SIZE = 10 * 1024;
+constexpr static uint32_t TASK_SIZE = 20 * 1024;
 
-QueueHandle_t pending_socks,socks_for_fds;
+QueueHandle_t pending_socks, socks_for_fds;
 
-void error_check(int &error_count,const char ptr[])
+void error_check(int &error_count, const char ptr[])
 {
     constexpr std::size_t MAX_ERRORS_BEFORE_RESTART = 10;
     if (error_count >= MAX_ERRORS_BEFORE_RESTART)
@@ -21,7 +21,7 @@ static void tcp_server_task(void *pvParameters)
 {
     constexpr std::size_t MAX_ERRORS_BEFORE_RESTART = 10;
     constexpr std::size_t TIME_BETWEEN_TRIES_AFTER_ERROR = 500;
-    char addr_str[128];
+    // char addr_str[128];
     int addr_family = (int)pvParameters;
     int ip_protocol = 0;
     int error_count = 0;
@@ -30,7 +30,6 @@ static void tcp_server_task(void *pvParameters)
     // int keepInterval = KEEPALIVE_INTERVAL;
     // int keepCount = KEEPALIVE_COUNT;
     struct sockaddr_storage dest_addr;
-    
 
 #ifdef CONFIG_EXAMPLE_IPV4
     if (addr_family == AF_INET)
@@ -119,98 +118,56 @@ static void tcp_server_task(void *pvParameters)
             struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
             socklen_t addr_len = sizeof(source_addr);
             int new_sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-            if(new_sock>63){
-                ESP_LOGI(TAG,"max socket number reached");
+            if (new_sock > 63)
+            {
+                ESP_LOGI(TAG, "max socket number reached");
                 closesocket(new_sock);
             }
-            else if(new_sock!=-1){
-                if(new_sock>max_socket)max_socket=new_sock;
-                message accepted_sock(new_sock,message::operation::write);
-                xQueueSendToBack(pending_socks,&accepted_sock,0);
+            else if (new_sock != -1)
+            {
+                if (new_sock > max_socket)
+                    max_socket = new_sock;
+                message accepted_sock(new_sock, message::operation::write);
+                xQueueSendToBack(pending_socks, &accepted_sock, 0);
             }
         }
-        for(int sock=0;sock<=max_socket;++sock){
-            if(sock==listen_sock)continue;
-            if(FD_ISSET(sock,&readfds)){
-                message msg(sock,message::operation::read);
-                xQueueSendToBack(pending_socks,&msg,0);
+        for (int sock = 0; sock <= max_socket; ++sock)
+        {
+            if (sock == listen_sock)
+                continue;
+            if (FD_ISSET(sock, &readfds))
+            {
+                message msg(sock, message::operation::read);
+                xQueueSendToBack(pending_socks, &msg, 0);
             }
-            if(FD_ISSET(sock,&writefds)){
-                message msg(sock,message::operation::write);
-                xQueueSendToBack(pending_socks,&msg,0);
-            }
-        }
-        message rec_msg(-1,message::operation::read);
-        while(xQueueReceive(socks_for_fds,&rec_msg,0)==pdPASS){
-            if(rec_msg.op==message::operation::read){
-                FD_SET(rec_msg.socket,&master_readfds);
-            }else if(rec_msg.op==message::operation::write){
-                FD_SET(rec_msg.socket,&master_writefds);
-            }else if(rec_msg.op==message::operation::delread){
-                FD_CLR(rec_msg.socket,&master_readfds);
-            }else if(rec_msg.op==message::operation::delwrite){
-                FD_CLR(rec_msg.socket,&master_writefds);
-            }else if(rec_msg.op==message::operation::delall){
-                FD_CLR(rec_msg.socket,&master_readfds);
-                FD_CLR(rec_msg.socket,&master_writefds);
+            if (FD_ISSET(sock, &writefds))
+            { // TODO mb clear master write after this to decrease num of duplicates
+                message msg(sock, message::operation::write);
+                xQueueSendToBack(pending_socks, &msg, 0);
+                FD_CLR(msg.socket, &master_writefds);
             }
         }
-
-
-//         if (FD_ISSET(listen_sock, &readfds))
-//         {
-//             struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
-//             socklen_t addr_len = sizeof(source_addr);
-//             int new_sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-
-//             tls = esp_tls_init();
-//             if (!tls)
-//             {
-//                 ESP_LOGE(TAG, "TLS init allocation failed");
-//                 closesocket(new_sock);
-//                 continue;
-//             }
-//             if (esp_tls_server_session_create(&tls_cfg, new_sock, tls) == 0)
-//             {
-//                 ESP_LOGI(TAG, "TLS handshake successful");
-//             }
-//             else
-//             {
-//                 ESP_LOGE(TAG, "TLS handshake failed");
-//                 esp_tls_server_session_delete(tls);
-//                 closesocket(new_sock);
-//                 continue;
-//             }
-// #ifdef CONFIG_EXAMPLE_IPV4
-//             if (source_addr.ss_family == PF_INET)
-//             {
-//                 inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
-//             }
-// #endif
-
-//             ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
-//             char buffer[] = "hello world";
-//             esp_tls_conn_write(tls, buffer, sizeof(buffer));
-//             // esp_tls_server_session_delete(tls);
-//             // closesocket(new_sock);
-//             if (new_sock > max_socket)
-//                 max_socket = new_sock;
-//             FD_SET(new_sock, &master_writefds);
-//         }
-//         for (int i = 0; i <= max_socket; ++i)
-//         { // TODO: move allat to worker thread, implement server session async
-//             if (FD_ISSET(i, &writefds))
-//             {
-//                 char buf[] = "crazy ";
-//                 int code = esp_tls_conn_write(tls, buf, sizeof(buf));
-//                 if (code < 0)
-//                 {
-//                     esp_tls_server_session_delete(tls);
-//                     closesocket(i);
-//                     FD_CLR(i, &master_writefds);
-//                 }
-//             }
-//         }
+        message rec_msg(-1, message::operation::read);
+        while (xQueueReceive(socks_for_fds, &rec_msg, 0) == pdPASS)
+        {
+            if (rec_msg.op == message::operation::read)
+            {
+                FD_SET(rec_msg.socket, &master_readfds);
+            }
+            else if (rec_msg.op == message::operation::write)
+            {
+                FD_SET(rec_msg.socket, &master_writefds);
+            }
+            else if (rec_msg.op == message::operation::delread)
+            {
+                FD_CLR(rec_msg.socket, &master_readfds);
+            }
+            else if (rec_msg.op == message::operation::delall)
+            {
+                FD_CLR(rec_msg.socket, &master_readfds);
+                FD_CLR(rec_msg.socket, &master_writefds);
+            }
+        }
     }
 }
 
@@ -221,13 +178,14 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(wifi_init_sta());
 #ifdef CONFIG_EXAMPLE_IPV4
-    pending_socks=xQueueCreate(10,sizeof(message));
-    socks_for_fds=xQueueCreate(10,sizeof(message));
-    if(!pending_socks || !socks_for_fds){
-        ESP_LOGW(TAG,"failed to create queue");
+    pending_socks = xQueueCreate(10, sizeof(message)); // TODO: adjust size
+    socks_for_fds = xQueueCreate(10, sizeof(message)); // TODO: adjust size
+    if (!pending_socks || !socks_for_fds)
+    {
+        ESP_LOGW(TAG, "failed to create queue");
         esp_restart();
     }
     xTaskCreate(tcp_server_task, "tcp_server", 6 * 1024, (void *)AF_INET, 0, NULL); // TODO: adjust size
-    xTaskCreate(worker,"worker",TASK_SIZE,NULL,0,NULL);
+    xTaskCreate(worker, "worker", TASK_SIZE, NULL, 0, NULL);
 #endif
 }

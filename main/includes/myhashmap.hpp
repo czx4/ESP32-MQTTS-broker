@@ -2,6 +2,7 @@
 #include "myvector.hpp"
 #include <atomic>
 #include "esp_chip_info.h"
+#include "esp_log.h"
 
 template <typename T>
 class myhashmap
@@ -47,8 +48,6 @@ private:
         Node(T &data_to_add, char *begin, char *end) : data(data_to_add), key(begin, end) {}
     };
 
-    SemaphoreHandle_t map_write_sem;
-    SemaphoreHandle_t sync_sem;
     myvector<std::unique_ptr<Node>> map;
 
     Node *alloc_node() noexcept
@@ -57,7 +56,7 @@ private:
     }
 
     void rehash(std::size_t new_size)
-    { // no need to get semaphore as it can only get called from within critical section in add()
+    {
         myvector<std::unique_ptr<Node>> tmpmap;
         tmpmap = std::move(map);
         if (!map.reserve(new_size))
@@ -213,7 +212,9 @@ public:
         typename U::element_type *return_data = nullptr;
 
         if (len > 0)
+        {
             id = static_cast<std::size_t>(fnv1a_hash(topic_ptr, len) % map.capacity);
+        }
         Node *ptr = map[id].get();
 
         while (ptr)
@@ -228,16 +229,15 @@ public:
         return return_data;
     }
 
-    bool add(char *topic_ptr, std::size_t len, T &data);
-    bool update(char *topic_ptr, std::size_t len, T &data);
+    bool add(char *topic_ptr, std::size_t len, T &&data);
+    bool update(char *topic_ptr, std::size_t len, T &&data);
     void erase(char *topic_ptr, std::size_t len);
     myhashmap<T> &operator=(myhashmap<T> &&h);
     ~myhashmap();
 };
 
 template <typename T>
-myhashmap<T>::~myhashmap()
-{
+myhashmap<T>::~myhashmap() {
 
 };
 
@@ -248,7 +248,7 @@ myhashmap<T>::myhashmap(std::size_t reserve_capacity)
 }
 
 template <typename T>
-bool myhashmap<T>::add(char *topic_ptr, std::size_t len, T &data)
+bool myhashmap<T>::add(char *topic_ptr, std::size_t len, T &&data)
 {
     std::size_t id = 0;
     if (len > 0)
@@ -296,7 +296,7 @@ bool myhashmap<T>::add(char *topic_ptr, std::size_t len, T &data)
 }
 
 template <typename T>
-bool myhashmap<T>::update(char *topic_ptr, std::size_t len, T &data)
+bool myhashmap<T>::update(char *topic_ptr, std::size_t len, T &&data)
 {
     std::size_t id = 0;
     if (len > 0)

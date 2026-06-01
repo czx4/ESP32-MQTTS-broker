@@ -17,84 +17,37 @@ class Client
 
 private:
     Subscription m_subscriptions = Subscription();
-    struct m_msg
-    {
-        myvector<uint8_t> m_payload;
-        uint8_t m_qos = 0;
-        uint16_t m_packet_id = 0;
-    };
-    std::optional<QueueHandle_t> m_msg_que;//TODO: rework
-
     bool retry_send(uint8_t *buffer_pointer, std::size_t length, std::array<uint8_t, 4> &resp_buff, uint8_t check_flag, uint16_t packetid);
 
 public:
-    enum state{
-        uninit,
-        processing_handshake,
+    enum state
+    {
         ready,
+        read_que,
     };
-    state client_state=state::uninit;
-    esp_tls_t *m_tls;
-    myvector<char> clientid;
-    bool completed_tls=false;
+    uint16_t qued_msg_pack_id = 0;
+    int sock = -1;
+    bool clean_session = true;
+    state client_state = state::ready;
 
-    // struct Will
-    // {
-    //     bool presence_flag = false;
-    //     bool retain = false;
-    //     myvector<char> topic;
-    //     myvector<uint8_t> msg;
-    //     uint8_t qos = 0;
-    //     void reset()
-    //     {
-    //         presence_flag = false;
-    //         retain = false;
-    //         topic = std::move(myvector<char>());
-    //         msg = std::move(myvector<uint8_t>());
-    //         qos = 0;
-    //     }
-    //     ~Will()
-    //     {
-    //         if (!presence_flag)
-    //         {
-    //             return;
-    //         }
-    //         publish_by_topic(topic.begin(), topic.size, msg.begin(), msg.size, qos, 0); // pack id can be random
-    //         // if (retain)
-    //         // {
-    //         //     myvector<uint8_t> *retained_msg = retained_sub_msg.get(topic.begin(), topic.size);
-    //         //     if (!retained_msg)
-    //         //     {
-    //         //         retained_sub_msg.add(topic.begin(), topic.size, msg);
-    //         //     }
-    //         //     else
-    //         //     {
-    //         //         retained_sub_msg.update(topic.begin(), topic.size, msg);
-    //         //     }
-    //         // }
-    //     }
-    // } will;
+    struct Will
+    {
+        bool presence_flag = false;
+        bool retain = false;
+        myvector<char> topic;
+        myvector<uint8_t> msg;
+        uint8_t qos = 0;
+    } will;
 
     Client();
 
-    void clean_session();
-
-    bool is_clean_session();
-
-    bool change_connection(Client *old_client);
-
-    void add_que_msg(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id = 0);
-    void read_que();
+    void del_subs();
 
     uint8_t subscribe(char *topic_ptr, std::size_t len, uint8_t qos);
 
     uint8_t is_subscribed(char *topic_ptr, std::size_t len);
 
     void unsubscribe(char *topic_ptr, std::size_t len);
-
-    void publish(uint8_t *buffer_pointer, std::size_t length, uint8_t qos, uint16_t packetid = 0);
-
-    static void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr, std::size_t buff_len, uint8_t qos, uint16_t packetid = 0);
 
     ~Client();
 };

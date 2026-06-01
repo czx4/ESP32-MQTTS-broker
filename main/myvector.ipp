@@ -36,6 +36,7 @@ myvector<T>::myvector(T val, std::size_t count)
    if (!reserve(count))
       return;
    size = count;
+   capacity = count;
    std::fill(begin(), end(), val);
 }
 

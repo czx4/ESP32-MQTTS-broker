@@ -89,7 +89,7 @@ static void conn_ack(esp_tls_t *tls, uint8_t return_code, bool session_present_f
     ESP_LOGI(TAG, "sent connack");
 }
 
-static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_t * cur_pos, sock_cid *sockst, Client::Will &will);
+static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_t *cur_pos, sock_cid *sockst, Client::Will &will);
 
 void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id, sock_cid *sockst)
 {
@@ -112,7 +112,6 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
         return;
     }
     int ret_write = esp_tls_conn_write(sockst->tls, buff_ptr, len);
-    ESP_LOGI(TAG,"published with %i return code msg was: %i sent to socket: %i",ret_write,*buff_ptr,sockst->client->sock);
     if (qos == 0)
     {
         return;
@@ -133,25 +132,26 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
 
 void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id, std::array<sock_cid, 64> &sock_to_clientid)
 {
-    if(packet_id==0){
-        packet_id=5;//TODO: in future random
+    if (packet_id == 0)
+    {
+        packet_id = 5; // TODO: in future random
     }
     if (!publish_msg_store.add(packet_id, buff_ptr, len, qos))
         return;
-    ESP_LOGI(TAG,"got to pub_by_topic len of packet: %i",len);
     for (auto &client : client_store)
     {
         if (client->sock != -1 && client->is_subscribed(topic_ptr, topic_len))
         {
-            ESP_LOGI(TAG,"found clinet to pub to");
             message msg(client->sock, message::operation::delread);
             sendtoque(msg);
-            msg.op=message::operation::write;
+            msg.op = message::operation::write;
             if (sendtoque(msg))
             {
                 add_packet_id(&sock_to_clientid[client->sock], sock_cid::packet_state::sendpublish, packet_id);
-            }else{
-                msg.op=message::operation::read;
+            }
+            else
+            {
+                msg.op = message::operation::read;
                 sendtoque(msg);
             }
         }
@@ -161,7 +161,6 @@ void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr,
 void worker(void *args)
 {
     std::array<sock_cid, 64> sock_to_clientid;
-    // sock_cid sock_to_clientid[64];
     message msg(-1, message::operation::read);
     std::array<uint8_t, BUFF_SIZE> buf;
 
@@ -174,19 +173,11 @@ void worker(void *args)
     tls_cfg.serverkey_bytes = sizeof(pem_prv_key);
 
     int recieved_len;
-    // uint8_t packet_type = 0;
-    // uint8_t packet_flags = 0;
     uint8_t *cur_pos = nullptr;
 
     uint16_t packet_length = 0;
     uint16_t multiplier = 1;
     uint8_t enc_byte = 0;
-
-    // uint8_t conn_flags = 0;
-    // uint16_t clientid_len = 0;
-
-    // bool username = false;
-    // bool password = false;
     while (true)
     {
         while (xQueueReceive(pending_socks, &msg, portMAX_DELAY) == pdPASS)
@@ -271,19 +262,27 @@ void worker(void *args)
                 recieved_len = esp_tls_conn_read(sockst->tls, buf.begin(), 1);
                 if (recieved_len <= 0)
                 {
-                    ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+                    if (recieved_len < 0)
+                    {
+                        ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+                    }
+                    else
+                    {
+                        ESP_LOGI(TAG, "Connection closed");
+                    }
                     drop_conn(msg, sockst, sock_to_clientid);
                     continue;
                 }
-                cur_pos=&buf[1];
+                cur_pos = &buf[1];
                 packet_length = 0;
                 multiplier = 1;
-                bool len_error=false;
-                uint8_t additional_packet_len=1;
+                bool len_error = false;
+                uint8_t additional_packet_len = 1;
                 do
                 {
-                    if(esp_tls_conn_read(sockst->tls,cur_pos,1)<=0){
-                        len_error=true;
+                    if (esp_tls_conn_read(sockst->tls, cur_pos, 1) <= 0)
+                    {
+                        len_error = true;
                         break;
                     }
                     enc_byte = *cur_pos++;
@@ -292,40 +291,44 @@ void worker(void *args)
                     if (multiplier > 128 * 128 * 128)
                     {
                         ESP_LOGW(TAG, "msg len malformed");
-                        len_error=true;
+                        len_error = true;
                         break;
                     }
                     ++additional_packet_len;
                 } while ((enc_byte & 128) != 0);
 
-                if(len_error || packet_length+additional_packet_len>1024){
-                    ESP_LOGI(TAG,"length error");
-                    drop_conn(msg,sockst,sock_to_clientid);
+                if (len_error || packet_length + additional_packet_len > 1024)
+                {
+                    ESP_LOGI(TAG, "length error");
+                    drop_conn(msg, sockst, sock_to_clientid);
                     continue;
                 }
 
-                {                    
-                std::size_t sum=0;
-                uint8_t* tmp_ptr=cur_pos;
+                {
+                    std::size_t sum = 0;
+                    uint8_t *tmp_ptr = cur_pos;
 
-                while(sum<packet_length){
-                    int read_code=esp_tls_conn_read(sockst->tls,tmp_ptr,packet_length-sum);
-                    if(read_code<=0){
-                        len_error=true;
-                        break;
+                    while (sum < packet_length)
+                    {
+                        int read_code = esp_tls_conn_read(sockst->tls, tmp_ptr, packet_length - sum);
+                        if (read_code <= 0)
+                        {
+                            len_error = true;
+                            break;
+                        }
+                        sum += read_code;
+                        tmp_ptr += read_code;
                     }
-                    sum+=read_code;
-                    tmp_ptr+=read_code;
-                }
                 }
 
-                if(len_error){
-                    ESP_LOGI(TAG,"length error");
-                    drop_conn(msg,sockst,sock_to_clientid);
+                if (len_error)
+                {
+                    ESP_LOGI(TAG, "length error");
+                    drop_conn(msg, sockst, sock_to_clientid);
                     continue;
                 }
 
-                packet_length+=additional_packet_len;
+                packet_length += additional_packet_len;
 
                 if (sockst->clientid_len == 0)
                 {
@@ -375,7 +378,9 @@ void worker(void *args)
                         sockst->client->client_state = Client::state::read_que;
                         msg.op = message::operation::write;
                         sendtoque(msg);
-                    }else{
+                    }
+                    else
+                    {
                         msg.op = message::operation::read;
                         sendtoque(msg);
                     }
@@ -458,8 +463,10 @@ void worker(void *args)
                             {
                                 add_packet_id(sockst, sock_cid::packet_state::sendpubrec, packetid);
                             }
-                        }else{
-                            msg.op=message::operation::read;
+                        }
+                        else
+                        {
+                            msg.op = message::operation::read;
                             sendtoque(msg);
                         }
                         publish_by_topic(topic_ptr, topic_len, buf.begin(), packet_length, packet_qos, packetid, sock_to_clientid);
@@ -498,7 +505,7 @@ void worker(void *args)
                         {
                             publish_msg_store.erase(pubid_check);
                         }
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -562,13 +569,13 @@ void worker(void *args)
                             continue;
                         }
                         packet_id_ptr->first = 0;
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
                     else if (buf[0] == PUBREL)
                     {
-                        if (packet_length> 4 || buf[1] != 2)
+                        if (packet_length > 4 || buf[1] != 2)
                         {
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
@@ -666,7 +673,7 @@ void worker(void *args)
                         }
                         esp_tls_conn_write(sockst->tls, suback.begin(), suback.size);
                         ESP_LOGI(TAG, "suback sent");
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -699,7 +706,7 @@ void worker(void *args)
 
                         esp_tls_conn_write(sockst->tls, unsuback.begin(), unsuback.size());
                         ESP_LOGI(TAG, "unsuback sent");
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -710,7 +717,7 @@ void worker(void *args)
                         pingresp[1] = 0x00;
                         esp_tls_conn_write(sockst->tls, pingresp.begin(), pingresp.size());
                         ESP_LOGI(TAG, "pingresp sent");
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -764,7 +771,7 @@ void worker(void *args)
                         puback[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, puback.begin(), 4);
                         packetid_ptr->first = 0;
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -777,7 +784,7 @@ void worker(void *args)
                         pubrec[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, pubrec.begin(), 4);
                         packetid_ptr->second = sock_cid::packet_state::getpubrel;
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -790,7 +797,7 @@ void worker(void *args)
                         pubrel[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, pubrel.begin(), 4);
                         packetid_ptr->second = sock_cid::packet_state::getpubcomp;
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -803,7 +810,7 @@ void worker(void *args)
                         pubcomp[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, pubcomp.begin(), 4);
                         packetid_ptr->first = 0;
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
                     }
@@ -818,7 +825,7 @@ void worker(void *args)
                                 publish_msg_store.erase(packetid_ptr->first);
                             }
                         }
-                        msg.op=message::operation::read;
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                     }
                 }
@@ -827,7 +834,7 @@ void worker(void *args)
     }
 }
 
-static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_t* cur_pos, sock_cid *sockst, Client::Will &will)
+static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_t *cur_pos, sock_cid *sockst, Client::Will &will)
 {
     uint8_t packet_type = (buf[0] & 0xF0) >> 4;
     uint8_t packet_flags = (buf[0] & 0x0F);
@@ -966,5 +973,4 @@ static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_
     if (clean_session)
         return mqtt_conn_return::clean_session;
     return unclean_session;
-
 }

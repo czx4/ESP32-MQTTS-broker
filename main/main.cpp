@@ -21,14 +21,9 @@ static void tcp_server_task(void *pvParameters)
 {
     constexpr std::size_t MAX_ERRORS_BEFORE_RESTART = 10;
     constexpr std::size_t TIME_BETWEEN_TRIES_AFTER_ERROR = 500;
-    // char addr_str[128];
     int addr_family = (int)pvParameters;
     int ip_protocol = 0;
     int error_count = 0;
-    // int keepAlive = 1;
-    // int keepIdle = KEEPALIVE_IDLE;
-    // int keepInterval = KEEPALIVE_INTERVAL;
-    // int keepCount = KEEPALIVE_COUNT;
     struct sockaddr_storage dest_addr;
 
 #ifdef CONFIG_EXAMPLE_IPV4
@@ -112,7 +107,7 @@ static void tcp_server_task(void *pvParameters)
     {
         readfds = master_readfds;
         writefds = master_writefds;
-        struct timeval tv{0,0};
+        struct timeval tv{0, 0};
         select(max_socket + 1, &readfds, &writefds, NULL, &tv);
         if (FD_ISSET(listen_sock, &readfds))
         {
@@ -143,7 +138,7 @@ static void tcp_server_task(void *pvParameters)
                 FD_CLR(msg.socket, &master_readfds);
             }
             if (FD_ISSET(sock, &writefds))
-            { 
+            {
                 message msg(sock, message::operation::write);
                 xQueueSendToBack(pending_socks, &msg, 0);
                 FD_CLR(msg.socket, &master_writefds);

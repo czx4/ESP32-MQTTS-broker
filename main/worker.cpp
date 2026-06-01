@@ -89,7 +89,7 @@ static void conn_ack(esp_tls_t *tls, uint8_t return_code, bool session_present_f
     ESP_LOGI(TAG, "sent connack");
 }
 
-static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, sock_cid *sockst, Client::Will &will);
+static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_t * cur_pos, sock_cid *sockst, Client::Will &will);
 
 void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id, sock_cid *sockst)
 {
@@ -112,7 +112,7 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
         return;
     }
     int ret_write = esp_tls_conn_write(sockst->tls, buff_ptr, len);
-
+    ESP_LOGI(TAG,"published with %i return code msg was: %i sent to socket: %i",ret_write,*buff_ptr,sockst->client->sock);
     if (qos == 0)
     {
         return;
@@ -133,16 +133,26 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
 
 void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id, std::array<sock_cid, 64> &sock_to_clientid)
 {
-    if (packet_id == 0 || !publish_msg_store.add(packet_id, buff_ptr, len, qos))
+    if(packet_id==0){
+        packet_id=5;//TODO: in future random
+    }
+    if (!publish_msg_store.add(packet_id, buff_ptr, len, qos))
         return;
+    ESP_LOGI(TAG,"got to pub_by_topic len of packet: %i",len);
     for (auto &client : client_store)
     {
         if (client->sock != -1 && client->is_subscribed(topic_ptr, topic_len))
         {
-            message msg(client->sock, message::operation::write);
+            ESP_LOGI(TAG,"found clinet to pub to");
+            message msg(client->sock, message::operation::delread);
+            sendtoque(msg);
+            msg.op=message::operation::write;
             if (sendtoque(msg))
             {
                 add_packet_id(&sock_to_clientid[client->sock], sock_cid::packet_state::sendpublish, packet_id);
+            }else{
+                msg.op=message::operation::read;
+                sendtoque(msg);
             }
         }
     }
@@ -209,6 +219,7 @@ void worker(void *args)
                     sockst->phs = sock_cid::phase::mqtt;
                     msg.op = message::operation::read;
                     sendtoque(msg);
+                    continue;
                 }
                 else if (code == ESP_TLS_ERR_SSL_WANT_WRITE)
                 {
@@ -235,22 +246,19 @@ void worker(void *args)
                 }
                 else if (code == 0)
                 {
-                    sendtoque(msg);
                     msg.op = message::operation::read;
                     sockst->phs = sock_cid::phase::mqtt;
                     sendtoque(msg);
+                    continue;
                 }
                 else if (code == ESP_TLS_ERR_SSL_WANT_WRITE)
                 {
-                    msg.op = message::operation::delread;
-                    sendtoque(msg);
                     msg.op = message::operation::write;
                     sendtoque(msg);
                     continue;
                 }
                 else if (code == ESP_TLS_ERR_SSL_WANT_READ)
                 {
-                    sendtoque(msg);
                     msg.op = message::operation::read;
                     sendtoque(msg);
                     continue;
@@ -260,17 +268,69 @@ void worker(void *args)
             // MQTT PHASE
             if (msg.op == message::operation::read)
             {
-                recieved_len = esp_tls_conn_read(sockst->tls, buf.begin(), buf.size());
+                recieved_len = esp_tls_conn_read(sockst->tls, buf.begin(), 1);
                 if (recieved_len <= 0)
                 {
                     ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
                     drop_conn(msg, sockst, sock_to_clientid);
                     continue;
                 }
+                cur_pos=&buf[1];
+                packet_length = 0;
+                multiplier = 1;
+                bool len_error=false;
+                uint8_t additional_packet_len=1;
+                do
+                {
+                    if(esp_tls_conn_read(sockst->tls,cur_pos,1)<=0){
+                        len_error=true;
+                        break;
+                    }
+                    enc_byte = *cur_pos++;
+                    packet_length += (enc_byte & 127) * multiplier;
+                    multiplier *= 128;
+                    if (multiplier > 128 * 128 * 128)
+                    {
+                        ESP_LOGW(TAG, "msg len malformed");
+                        len_error=true;
+                        break;
+                    }
+                    ++additional_packet_len;
+                } while ((enc_byte & 128) != 0);
+
+                if(len_error || packet_length+additional_packet_len>1024){
+                    ESP_LOGI(TAG,"length error");
+                    drop_conn(msg,sockst,sock_to_clientid);
+                    continue;
+                }
+
+                {                    
+                std::size_t sum=0;
+                uint8_t* tmp_ptr=cur_pos;
+
+                while(sum<packet_length){
+                    int read_code=esp_tls_conn_read(sockst->tls,tmp_ptr,packet_length-sum);
+                    if(read_code<=0){
+                        len_error=true;
+                        break;
+                    }
+                    sum+=read_code;
+                    tmp_ptr+=read_code;
+                }
+                }
+
+                if(len_error){
+                    ESP_LOGI(TAG,"length error");
+                    drop_conn(msg,sockst,sock_to_clientid);
+                    continue;
+                }
+
+                packet_length+=additional_packet_len;
+
                 if (sockst->clientid_len == 0)
                 {
                     Client::Will will;
-                    mqtt_conn_return ret = connect_mqtt(buf, sockst, will);
+                    mqtt_conn_return ret = connect_mqtt(buf, cur_pos, sockst, will);
                     if (ret == mqtt_conn_return::disconnect)
                     {
                         drop_conn(msg, sockst, sock_to_clientid);
@@ -313,9 +373,10 @@ void worker(void *args)
                     if (sockst->client->qued_msg_pack_id != 0)
                     {
                         sockst->client->client_state = Client::state::read_que;
-                        msg.op = message::operation::delread;
-                        sendtoque(msg);
                         msg.op = message::operation::write;
+                        sendtoque(msg);
+                    }else{
+                        msg.op = message::operation::read;
                         sendtoque(msg);
                     }
                     continue;
@@ -354,26 +415,6 @@ void worker(void *args)
                         {
                             retain = true;
                         }
-                        packet_length = 0;
-                        multiplier = 1;
-                        bool pub_len_error = false;
-
-                        do // TODO: if bigger than buffer log warn and discard
-                        {
-                            enc_byte = *cur_pos++;
-                            packet_length += (enc_byte & 127) * multiplier;
-                            multiplier *= 128;
-                            if (multiplier > 128 * 128 * 128)
-                            {
-                                pub_len_error = true;
-                                break;
-                            }
-                        } while ((enc_byte & 128) != 0); // TODO: maybe add check if its bigger then recieved len and put it in its own scope i dont need it here probably
-                        if (pub_len_error || packet_length > BUFF_SIZE)
-                        {
-                            drop_conn(msg, sockst, sock_to_clientid);
-                            continue;
-                        }
 
                         uint16_t topic_len = ntohs(*reinterpret_cast<uint16_t *>(cur_pos));
                         cur_pos += 2;
@@ -388,8 +429,8 @@ void worker(void *args)
 
                         if (retain)
                         {
-                            myvector<uint8_t> tmp_msg(buf.begin(), buf.begin() + recieved_len);
-                            if (tmp_msg.size == recieved_len)
+                            myvector<uint8_t> tmp_msg(buf.begin(), buf.begin() + packet_length);
+                            if (tmp_msg.size == packet_length)
                             {
                                 myvector<uint8_t> *retained_msg = retained_sub_msg.get(topic_ptr, topic_len);
                                 if (!retained_msg)
@@ -417,8 +458,11 @@ void worker(void *args)
                             {
                                 add_packet_id(sockst, sock_cid::packet_state::sendpubrec, packetid);
                             }
+                        }else{
+                            msg.op=message::operation::read;
+                            sendtoque(msg);
                         }
-                        publish_by_topic(topic_ptr, topic_len, buf.begin(), recieved_len, packet_qos, packetid, sock_to_clientid);
+                        publish_by_topic(topic_ptr, topic_len, buf.begin(), packet_length, packet_qos, packetid, sock_to_clientid);
                         continue;
                     }
                     else if (buf[0] == PUBACK)
@@ -440,7 +484,7 @@ void worker(void *args)
                             continue;
                         }
                         Publishhashmap::Node_pubmap *msg_info = publish_msg_store.get(pubid_check);
-                        if (recieved_len > 4 || buf[1] != 2)
+                        if (packet_length > 4 || buf[1] != 2)
                         {
                             if (!msg_info)
                             { // pretty radical but i am currently feeling like that and MQTT 3.1.1 docs state that if i can't send publish i can drop conn
@@ -454,6 +498,8 @@ void worker(void *args)
                         {
                             publish_msg_store.erase(pubid_check);
                         }
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if (buf[0] == PUBREC)
@@ -474,7 +520,7 @@ void worker(void *args)
                             continue;
                         }
                         Publishhashmap::Node_pubmap *msg_info = publish_msg_store.get(pubid_check);
-                        if (recieved_len > 4 || buf[1] != 2)
+                        if (packet_length > 4 || buf[1] != 2)
                         {
                             if (!msg_info)
                             { // pretty radical but i am currently feeling like that and MQTT 3.1.1 docs state that if i can't send publish i can drop conn
@@ -493,9 +539,9 @@ void worker(void *args)
                         sendtoque(msg);
                         continue;
                     }
-                    if (buf[0] == PUBCOMP)
+                    else if (buf[0] == PUBCOMP)
                     {
-                        if (recieved_len > 4 || buf[1] != 2)
+                        if (packet_length > 4 || buf[1] != 2)
                         {
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
@@ -516,11 +562,13 @@ void worker(void *args)
                             continue;
                         }
                         packet_id_ptr->first = 0;
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if (buf[0] == PUBREL)
                     {
-                        if (recieved_len > 4 || buf[1] != 2)
+                        if (packet_length> 4 || buf[1] != 2)
                         {
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
@@ -549,28 +597,7 @@ void worker(void *args)
                     {
                         ESP_LOGI(TAG, "subscribe recieved");
 
-                        cur_pos = &buf[0];
-                        if (!((*cur_pos++ & 0x0F) == SUBSCRIBE_RESERVED))
-                        {
-                            drop_conn(msg, sockst, sock_to_clientid);
-                            continue;
-                        }
-                        packet_length = 0;
-                        multiplier = 1;
-                        bool sub_len_error = false;
-                        do
-                        {
-                            enc_byte = *cur_pos++;
-                            packet_length += (enc_byte & 127) * multiplier;
-                            multiplier *= 128;
-                            if (multiplier > 128 * 128 * 128)
-                            {
-                                sub_len_error = true;
-                                break;
-                            }
-                        } while ((enc_byte & 128) != 0);
-
-                        if (sub_len_error || packet_length > BUFF_SIZE)
+                        if (!((buf[0] & 0x0F) == SUBSCRIBE_RESERVED))
                         {
                             drop_conn(msg, sockst, sock_to_clientid);
                             continue;
@@ -587,6 +614,7 @@ void worker(void *args)
                         suback.push_back(0);          // for size below
                         suback.push_back(*cur_pos++); // packet id MSB
                         suback.push_back(*cur_pos++); // packet id LSB
+                        packet_length -= additional_packet_len;
                         packet_length -= 2;
 
                         while (packet_length > 0)
@@ -624,50 +652,31 @@ void worker(void *args)
                                 *cur_pos |= 128;
                                 if (!suback.insert(insert_id++, 0))
                                 {
-                                    sub_len_error = true;
+                                    len_error = true;
                                     ESP_LOGI(TAG, "suback len memory error");
                                     break;
                                 }
                             }
                             cur_pos++;
                         } while (sub_ack_len > 0);
-                        if (sub_len_error)
+                        if (len_error)
                         {
                             drop_conn(msg, sockst, sock_to_clientid);
                             continue;
                         }
                         esp_tls_conn_write(sockst->tls, suback.begin(), suback.size);
                         ESP_LOGI(TAG, "suback sent");
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if ((buf[0] & GET_CONTROL_PACKET_TYPE) == UNSUBSCRIBE)
                     {
-                        cur_pos = &buf[0];
                         ESP_LOGI(TAG, "unsubscribe recieved");
-                        if (!((*cur_pos++ & 0x0F) == SUBSCRIBE_RESERVED))
+                        if (!((buf[0] & 0x0F) == SUBSCRIBE_RESERVED))
                         {
                             ESP_LOGW(TAG, "malformed reserved bits");
                             drop_conn(msg, sockst, sock_to_clientid);
-                        }
-                        packet_length = 0;
-                        multiplier = 1;
-                        bool unsub_len_error = false;
-                        do
-                        {
-                            enc_byte = *cur_pos++;
-                            packet_length += (enc_byte & 127) * multiplier;
-                            multiplier *= 128;
-                            if (multiplier > 128 * 128 * 128)
-                            {
-                                unsub_len_error = true;
-                                break;
-                            }
-                        } while ((enc_byte & 128) != 0);
-
-                        if (unsub_len_error || packet_length > BUFF_SIZE)
-                        {
-                            drop_conn(msg, sockst, sock_to_clientid);
-                            continue;
                         }
 
                         std::array<uint8_t, 4> unsuback;
@@ -675,6 +684,7 @@ void worker(void *args)
                         unsuback[1] = 2;          // pack type and len
                         unsuback[3] = *cur_pos++; // packet id (MSB)
                         unsuback[4] = *cur_pos++; //(LSB)
+                        packet_length -= additional_packet_len;
                         packet_length -= 2;
 
                         while (packet_length > 0)
@@ -689,6 +699,8 @@ void worker(void *args)
 
                         esp_tls_conn_write(sockst->tls, unsuback.begin(), unsuback.size());
                         ESP_LOGI(TAG, "unsuback sent");
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if ((buf[0] & GET_CONTROL_PACKET_TYPE) == PINGRESP)
@@ -698,6 +710,8 @@ void worker(void *args)
                         pingresp[1] = 0x00;
                         esp_tls_conn_write(sockst->tls, pingresp.begin(), pingresp.size());
                         ESP_LOGI(TAG, "pingresp sent");
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if ((buf[0] & GET_CONTROL_PACKET_TYPE) == DISCONNECT)
@@ -712,6 +726,7 @@ void worker(void *args)
             {
                 if (sockst->client->client_state == Client::state::read_que)
                 {
+                    sockst->client->client_state = Client::state::ready;
                     msg.op = message::operation::read;
                     sendtoque(msg);
                     Publishhashmap::Node_pubmap *node = publish_msg_store.get(sockst->client->qued_msg_pack_id);
@@ -724,7 +739,6 @@ void worker(void *args)
                         }
                     }
                     sockst->client->qued_msg_pack_id = 0;
-                    sockst->client->client_state = Client::state::ready;
                 }
                 else if (sockst->client->client_state == Client::state::ready)
                 {
@@ -750,6 +764,8 @@ void worker(void *args)
                         puback[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, puback.begin(), 4);
                         packetid_ptr->first = 0;
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if (packetid_ptr->second == sock_cid::packet_state::sendpubrec)
@@ -761,6 +777,8 @@ void worker(void *args)
                         pubrec[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, pubrec.begin(), 4);
                         packetid_ptr->second = sock_cid::packet_state::getpubrel;
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if (packetid_ptr->second == sock_cid::packet_state::sendpubrel)
@@ -772,6 +790,8 @@ void worker(void *args)
                         pubrel[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, pubrel.begin(), 4);
                         packetid_ptr->second = sock_cid::packet_state::getpubcomp;
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if (packetid_ptr->second == sock_cid::packet_state::sendpubcomp)
@@ -783,6 +803,8 @@ void worker(void *args)
                         pubcomp[3] = packetid_ptr->first & 0xFF;
                         esp_tls_conn_write(sockst->tls, pubcomp.begin(), 4);
                         packetid_ptr->first = 0;
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                         continue;
                     }
                     else if (packetid_ptr->second == sock_cid::packet_state::sendpublish)
@@ -796,6 +818,8 @@ void worker(void *args)
                                 publish_msg_store.erase(packetid_ptr->first);
                             }
                         }
+                        msg.op=message::operation::read;
+                        sendtoque(msg);
                     }
                 }
             }
@@ -803,14 +827,10 @@ void worker(void *args)
     }
 }
 
-static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, sock_cid *sockst, Client::Will &will)
+static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, uint8_t* cur_pos, sock_cid *sockst, Client::Will &will)
 {
-    uint16_t multiplier = 1;
-    uint8_t enc_byte = 0;
-    uint16_t packet_length = 0;
     uint8_t packet_type = (buf[0] & 0xF0) >> 4;
     uint8_t packet_flags = (buf[0] & 0x0F);
-    uint8_t *cur_pos = &buf[1];
     uint8_t conn_flags = 0;
     uint16_t keepalv_sec = 0;
 
@@ -819,23 +839,6 @@ static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, sock_c
     bool clean_session = true;
     bool username = false;
     bool password = false;
-
-    do
-    {
-        enc_byte = *cur_pos++;
-        packet_length += (enc_byte & 127) * multiplier;
-        multiplier *= 128;
-        if (multiplier > 128 * 128 * 128)
-        {
-            ESP_LOGW(TAG, "msg len malformed");
-            return disconnect;
-        }
-    } while ((enc_byte & 128) != 0);
-    if (packet_length > BUFF_SIZE)
-    {
-        ESP_LOGI(TAG, "discarding connection which sent bigger initial msg than buffer");
-        return disconnect;
-    }
 
     if (!(packet_type == 0x01))
     {
@@ -915,12 +918,6 @@ static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, sock_c
     else
     {
         std::copy(reinterpret_cast<char *>(cur_pos), reinterpret_cast<char *>(cur_pos + clientid_len), sockst->clientid.begin());
-        // sockst->clientid = myvector<char>(reinterpret_cast<char *>(cur_pos), reinterpret_cast<char *>(cur_pos + clientid_len));
-        // if (sockst->clientid.size != clientid_len)
-        // {
-        //     ESP_LOGW(TAG, "clientid memory error");
-        //     return disconnect;
-        // }
         cur_pos += clientid_len;
         sockst->clientid_len = clientid_len;
     }
@@ -970,7 +967,4 @@ static mqtt_conn_return connect_mqtt(std::array<uint8_t, BUFF_SIZE> &buf, sock_c
         return mqtt_conn_return::clean_session;
     return unclean_session;
 
-    // check if any other client with the same cid connected and check if last connection was clean or not read que transfer subs etc
-    // conn_ack(sockst->tls, 0x00, clean_session);
-    // client->client_state = Client::state::ready;
 }

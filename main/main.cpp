@@ -112,7 +112,8 @@ static void tcp_server_task(void *pvParameters)
     {
         readfds = master_readfds;
         writefds = master_writefds;
-        select(max_socket + 1, &readfds, &writefds, NULL, NULL);
+        struct timeval tv{0,0};
+        select(max_socket + 1, &readfds, &writefds, NULL, &tv);
         if (FD_ISSET(listen_sock, &readfds))
         {
             struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
@@ -139,9 +140,10 @@ static void tcp_server_task(void *pvParameters)
             {
                 message msg(sock, message::operation::read);
                 xQueueSendToBack(pending_socks, &msg, 0);
+                FD_CLR(msg.socket, &master_readfds);
             }
             if (FD_ISSET(sock, &writefds))
-            { // TODO mb clear master write after this to decrease num of duplicates
+            { 
                 message msg(sock, message::operation::write);
                 xQueueSendToBack(pending_socks, &msg, 0);
                 FD_CLR(msg.socket, &master_writefds);

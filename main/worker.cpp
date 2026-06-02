@@ -413,7 +413,7 @@ void worker(void *args)
                         { // dup flag
                             ESP_LOGI(TAG, "recieved duplicate publish");
                         }
-                        if (buf[0] & 0x06)
+                        if ((buf[0] & 0x06) == 0x06)
                         { // wrong, not allowed as it is reserved
                             ESP_LOGW(TAG, "not allowed");
                             drop_conn(msg, sockst, sock_to_clientid);
@@ -493,7 +493,9 @@ void worker(void *args)
                     }
                     else if (buf[0] == PUBACK)
                     {
-                        uint16_t pubid_check = (buf[2] << 8) | buf[3];
+                        uint16_t pubid_check = (buf[3] << 8) | buf[2];
+
+                        ESP_LOGI(TAG,"trying to find id: %i",pubid_check);
                         bool found_packid = false;
                         for (auto &state_pair : sockst->packid_state)
                         {
@@ -506,6 +508,7 @@ void worker(void *args)
                         }
                         if (!found_packid)
                         {
+                            ESP_LOGI(TAG,"couldnt find packet_id for sock: %i",sock);
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
                         }
@@ -514,6 +517,7 @@ void worker(void *args)
                         {
                             if (!msg_info)
                             { // pretty radical but i am currently feeling like that and MQTT 3.1.1 docs state that if i can't send publish i can drop conn
+                                ESP_LOGI(TAG,"couldnt find msg_info for sock: %i",sock);
                                 drop_conn(msg, sockst, sock_to_clientid);
                                 continue;
                             }
@@ -530,7 +534,7 @@ void worker(void *args)
                     }
                     else if (buf[0] == PUBREC)
                     {
-                        uint16_t pubid_check = (buf[2] << 8) | buf[3];
+                        uint16_t pubid_check = (buf[3] << 8) | buf[2];
                         sock_cid::packid_state_item *packet_id_ptr = nullptr;
                         for (auto &state_pair : sockst->packid_state)
                         {
@@ -572,7 +576,7 @@ void worker(void *args)
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
                         }
-                        uint16_t pubid_check = (buf[2] << 8) | buf[3];
+                        uint16_t pubid_check = (buf[3] << 8) | buf[2];
                         sock_cid::packid_state_item *packet_id_ptr = nullptr;
                         for (auto &state_pair : sockst->packid_state)
                         {
@@ -599,7 +603,7 @@ void worker(void *args)
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
                         }
-                        uint16_t pubid_check = (buf[2] << 8) | buf[3];
+                        uint16_t pubid_check = (buf[3] << 8) | buf[2];
                         sock_cid::packid_state_item *packet_id_ptr = nullptr;
                         for (auto &state_pair : sockst->packid_state)
                         {
@@ -785,8 +789,8 @@ void worker(void *args)
                             std::array<uint8_t, 4> puback;
                             puback[0] = PUBACK;
                             puback[1] = 2;
-                            puback[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
-                            puback[3] = packetid_ptr->packet_id & 0xFF;
+                            puback[2] = packetid_ptr->packet_id & 0xFF;
+                            puback[3] = (packetid_ptr->packet_id >> 8) & 0xFF;
                             esp_tls_conn_write(sockst->tls, puback.begin(), 4);
                             packetid_ptr->packet_id = 0;
                             msg.op = message::operation::read;
@@ -797,8 +801,8 @@ void worker(void *args)
                             std::array<uint8_t, 4> pubrec;
                             pubrec[0] = PUBREC;
                             pubrec[1] = 2;
-                            pubrec[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
-                            pubrec[3] = packetid_ptr->packet_id & 0xFF;
+                            pubrec[2] = packetid_ptr->packet_id & 0xFF;
+                            pubrec[3] = (packetid_ptr->packet_id >> 8) & 0xFF;
                             esp_tls_conn_write(sockst->tls, pubrec.begin(), 4);
                             packetid_ptr->state = sock_cid::packet_state::getpubrel;
                             msg.op = message::operation::read;
@@ -809,8 +813,8 @@ void worker(void *args)
                             std::array<uint8_t, 4> pubrel;
                             pubrel[0] = PUBREL;
                             pubrel[1] = 2;
-                            pubrel[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
-                            pubrel[3] = packetid_ptr->packet_id & 0xFF;
+                            pubrel[2] = packetid_ptr->packet_id & 0xFF;
+                            pubrel[3] = (packetid_ptr->packet_id >> 8) & 0xFF;
                             esp_tls_conn_write(sockst->tls, pubrel.begin(), 4);
                             packetid_ptr->state = sock_cid::packet_state::getpubcomp;
                             msg.op = message::operation::read;
@@ -821,8 +825,8 @@ void worker(void *args)
                             std::array<uint8_t, 4> pubcomp;
                             pubcomp[0] = PUBCOMP;
                             pubcomp[1] = 2;
-                            pubcomp[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
-                            pubcomp[3] = packetid_ptr->packet_id & 0xFF;
+                            pubcomp[2] = packetid_ptr->packet_id & 0xFF;
+                            pubcomp[3] = (packetid_ptr->packet_id >> 8) & 0xFF;
                             esp_tls_conn_write(sockst->tls, pubcomp.begin(), 4);
                             packetid_ptr->packet_id = 0;
                             msg.op = message::operation::read;

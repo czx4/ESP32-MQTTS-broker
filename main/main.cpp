@@ -175,8 +175,8 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(wifi_init_sta());
 #ifdef CONFIG_EXAMPLE_IPV4
-    pending_socks = xQueueCreate(10, sizeof(message)); // TODO: adjust size
-    socks_for_fds = xQueueCreate(10, sizeof(message)); // TODO: adjust size
+    pending_socks = xQueueCreate(50, sizeof(message)); // TODO: adjust size
+    socks_for_fds = xQueueCreate(50, sizeof(message)); // TODO: adjust size
     if (!pending_socks || !socks_for_fds)
     {
         ESP_LOGW(TAG, "failed to create queue");

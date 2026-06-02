@@ -21,61 +21,27 @@ static bool sendtoque(message &msg)
     return true;
 }
 
-void add_packet_id(sock_cid *sockst, sock_cid::packet_state state_to_add, uint16_t packet_id)
+void add_packet_id(sock_cid *sockst, sock_cid::packet_state state_to_add, uint16_t packet_id, uint8_t qos)
 {
     bool added = false; // TODO: maybe add ignoring the duplicate packet_ids
     for (auto &state_pair : sockst->packid_state)
     {
-        if (state_pair.first == 0)
+        if (state_pair.packet_id == 0)
         {
-            state_pair.first = packet_id;
-            state_pair.second = state_to_add;
+            state_pair.packet_id = packet_id;
+            state_pair.state = state_to_add;
+            state_pair.qos = qos;
             added = true;
             break;
         }
     }
     if (!added)
     {
-        sockst->packid_state.push_back({packet_id, state_to_add}); // TODO: can fail due to memory
+        sockst->packid_state.push_back({packet_id, state_to_add, qos}); // TODO: can fail due to memory
     }
 }
 
-static void drop_conn(message &msg, sock_cid *sockst, std::array<sock_cid, 64> &sock_to_clientid, bool sendwill = true)
-{
-    msg.op = message::operation::delall;
-    xQueueSendToBack(socks_for_fds, &msg, portMAX_DELAY); // TODO set some timeout
-    esp_tls_server_session_delete(sockst->tls);
-    closesocket(msg.socket);
-    if (sockst->client && sockst->client->will.presence_flag)
-    {
-        for (auto &client : client_store)
-        {
-            if (client->sock == sockst->client->sock)
-                continue;
-            if (client->sock != -1 && client->is_subscribed(sockst->client->will.topic.begin(), sockst->client->will.topic.size))
-            {
-                message msg(client->sock, message::operation::write);
-                if (sendtoque(msg))
-                {
-                    add_packet_id(&sock_to_clientid[client->sock], sock_cid::packet_state::sendpublish, 'w');
-                }
-            }
-        }
-    }
-    if (sockst->client && sockst->client->clean_session)
-    {
-        client_store.erase(sockst->clientid.begin(), sockst->clientid_len);
-    }
-    else if (sockst->client)
-    {
-        sockst->client->sock = -1;
-    }
-    sockst->phs = sock_cid::phase::uninit;
-    sockst->client = nullptr;
-    sockst->clientid_len = 0;
 
-    ESP_LOGI(TAG, "connection failed");
-}
 
 static void conn_ack(esp_tls_t *tls, uint8_t return_code, bool session_present_flag)
 {
@@ -123,7 +89,7 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
         return;
     }
     sock_cid::packet_state state_to_add = qos == 1 ? sock_cid::packet_state::getpuback : sock_cid::packet_state::getpubrec;
-    add_packet_id(sockst, state_to_add, packet_id);
+    add_packet_id(sockst, state_to_add, packet_id, qos);
     if (!node)
     {
         *buff_ptr |= DUPLICATION_FLAG;
@@ -149,14 +115,19 @@ void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr,
     }
     for (auto &client : client_store)
     {
-        if (client->sock != -1 && client->is_subscribed(topic_ptr, topic_len)!=EMPTY_QOS)
+        if (client->sock != -1)
         {
+            uint8_t client_qos = client->is_subscribed(topic_ptr, topic_len);
+            if(client_qos == EMPTY_QOS)
+                continue;
+            if(client_qos>qos)
+                client_qos=qos;
             message msg(client->sock, message::operation::delread);
             sendtoque(msg);
             msg.op = message::operation::write;
             if (sendtoque(msg))
             {
-                add_packet_id(&sock_to_clientid[client->sock], sock_cid::packet_state::sendpublish, packet_id);
+                add_packet_id(&sock_to_clientid[client->sock], sock_cid::packet_state::sendpublish, packet_id, client_qos);
                 ++node->count;
             }
             else
@@ -169,6 +140,37 @@ void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr,
     if(--node->count==0){
         publish_msg_store.erase(packet_id);
     }
+}
+
+static void drop_conn(message &msg, sock_cid *sockst, std::array<sock_cid, 64> &sock_to_clientid, bool sendwill = true)
+{
+    msg.op = message::operation::delall;
+    xQueueSendToBack(socks_for_fds, &msg, portMAX_DELAY); // TODO set some timeout
+    esp_tls_server_session_delete(sockst->tls);
+    closesocket(msg.socket);
+    if (sockst->client && sockst->client->will.presence_flag && sendwill)
+    {
+        int tmpsock=sockst->client->sock;
+        sockst->client->sock=-1;
+
+        Client::Will& will=sockst->client->will;
+        publish_by_topic(will.topic.begin(),will.topic.size,will.msg.begin(),will.msg.size,will.qos,esp_random(),sock_to_clientid);
+
+        sockst->client->sock=tmpsock;
+    }
+    if (sockst->client && sockst->client->clean_session)
+    {
+        client_store.erase(sockst->clientid.begin(), sockst->clientid_len);
+    }
+    else if (sockst->client)
+    {
+        sockst->client->sock = -1;
+    }
+    sockst->phs = sock_cid::phase::uninit;
+    sockst->client = nullptr;
+    sockst->clientid_len = 0;
+
+    ESP_LOGI(TAG, "connection failed");
 }
 
 void worker(void *args)
@@ -470,7 +472,7 @@ void worker(void *args)
                             msg.op = message::operation::write;
                             if (sendtoque(msg))
                             {
-                                add_packet_id(sockst, sock_cid::packet_state::sendpuback, packetid);
+                                add_packet_id(sockst, sock_cid::packet_state::sendpuback, packetid, packet_qos);
                             }
                         }
                         else if (packet_qos == 2)
@@ -478,7 +480,7 @@ void worker(void *args)
                             msg.op = message::operation::write;
                             if (sendtoque(msg))
                             {
-                                add_packet_id(sockst, sock_cid::packet_state::sendpubrec, packetid);
+                                add_packet_id(sockst, sock_cid::packet_state::sendpubrec, packetid, packet_qos);
                             }
                         }
                         else
@@ -495,10 +497,10 @@ void worker(void *args)
                         bool found_packid = false;
                         for (auto &state_pair : sockst->packid_state)
                         {
-                            if (state_pair.first == pubid_check && state_pair.second == sock_cid::packet_state::getpuback)
+                            if (state_pair.packet_id == pubid_check && state_pair.state == sock_cid::packet_state::getpuback)
                             {
                                 found_packid = true;
-                                state_pair.first = 0;
+                                state_pair.packet_id = 0;
                                 break;
                             }
                         }
@@ -529,10 +531,10 @@ void worker(void *args)
                     else if (buf[0] == PUBREC)
                     {
                         uint16_t pubid_check = (buf[2] << 8) | buf[3];
-                        std::pair<uint16_t, sock_cid::packet_state> *packet_id_ptr = nullptr;
+                        sock_cid::packid_state_item *packet_id_ptr = nullptr;
                         for (auto &state_pair : sockst->packid_state)
                         {
-                            if (state_pair.first == pubid_check && state_pair.second == sock_cid::packet_state::getpubrec)
+                            if (state_pair.packet_id == pubid_check && state_pair.state == sock_cid::packet_state::getpubrec)
                             {
                                 packet_id_ptr = &state_pair;
                                 break;
@@ -558,7 +560,7 @@ void worker(void *args)
                         {
                             publish_msg_store.erase(pubid_check);
                         }
-                        packet_id_ptr->second = sock_cid::packet_state::sendpubrel;
+                        packet_id_ptr->state = sock_cid::packet_state::sendpubrel;
                         msg.op = message::operation::write;
                         sendtoque(msg);
                         continue;
@@ -571,10 +573,10 @@ void worker(void *args)
                             continue;
                         }
                         uint16_t pubid_check = (buf[2] << 8) | buf[3];
-                        std::pair<uint16_t, sock_cid::packet_state> *packet_id_ptr = nullptr;
+                        sock_cid::packid_state_item *packet_id_ptr = nullptr;
                         for (auto &state_pair : sockst->packid_state)
                         {
-                            if (state_pair.first == pubid_check && state_pair.second == sock_cid::packet_state::getpubcomp)
+                            if (state_pair.packet_id == pubid_check && state_pair.state == sock_cid::packet_state::getpubcomp)
                             {
                                 packet_id_ptr = &state_pair;
                                 break;
@@ -585,7 +587,7 @@ void worker(void *args)
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
                         }
-                        packet_id_ptr->first = 0;
+                        packet_id_ptr->packet_id = 0;
                         msg.op = message::operation::read;
                         sendtoque(msg);
                         continue;
@@ -598,10 +600,10 @@ void worker(void *args)
                             continue;
                         }
                         uint16_t pubid_check = (buf[2] << 8) | buf[3];
-                        std::pair<uint16_t, sock_cid::packet_state> *packet_id_ptr = nullptr;
+                        sock_cid::packid_state_item *packet_id_ptr = nullptr;
                         for (auto &state_pair : sockst->packid_state)
                         {
-                            if (state_pair.first == pubid_check && state_pair.second == sock_cid::packet_state::getpubrel)
+                            if (state_pair.packet_id == pubid_check && state_pair.state == sock_cid::packet_state::getpubrel)
                             {
                                 packet_id_ptr = &state_pair;
                                 break;
@@ -612,7 +614,7 @@ void worker(void *args)
                             drop_conn(msg, sockst, sock_to_clientid); // TODO: since not ignoring the dup packid packets it must be found
                             continue;
                         }
-                        packet_id_ptr->second = sock_cid::packet_state::sendpubcomp;
+                        packet_id_ptr->state = sock_cid::packet_state::sendpubcomp;
                         msg.op = message::operation::write;
                         sendtoque(msg);
                         continue;
@@ -766,10 +768,10 @@ void worker(void *args)
                 }
                 else if (sockst->client->client_state == Client::state::ready)
                 {
-                    std::pair<uint16_t, sock_cid::packet_state> *packetid_ptr = nullptr;
+                    sock_cid::packid_state_item *packetid_ptr = nullptr;
                     for (auto &state_pair : sockst->packid_state)
                     {
-                        if (state_pair.first != 0 && (state_pair.second == sock_cid::packet_state::sendpuback || state_pair.second == sock_cid::packet_state::sendpubcomp || state_pair.second == sock_cid::packet_state::sendpubrec || state_pair.second == sock_cid::packet_state::sendpubrel || state_pair.second == sock_cid::packet_state::sendpublish))
+                        if (state_pair.packet_id != 0 && (state_pair.state == sock_cid::packet_state::sendpuback || state_pair.state == sock_cid::packet_state::sendpubcomp || state_pair.state == sock_cid::packet_state::sendpubrec || state_pair.state == sock_cid::packet_state::sendpubrel || state_pair.state == sock_cid::packet_state::sendpublish))
                         {
                             packetid_ptr = &state_pair;
                         }
@@ -778,58 +780,58 @@ void worker(void *args)
                         {
                             continue;
                         }
-                        if (packetid_ptr->second == sock_cid::packet_state::sendpuback)
+                        if (packetid_ptr->state == sock_cid::packet_state::sendpuback)
                         {
                             std::array<uint8_t, 4> puback;
                             puback[0] = PUBACK;
                             puback[1] = 2;
-                            puback[2] = (packetid_ptr->first >> 8) & 0xFF;
-                            puback[3] = packetid_ptr->first & 0xFF;
+                            puback[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
+                            puback[3] = packetid_ptr->packet_id & 0xFF;
                             esp_tls_conn_write(sockst->tls, puback.begin(), 4);
-                            packetid_ptr->first = 0;
+                            packetid_ptr->packet_id = 0;
                             msg.op = message::operation::read;
                             sendtoque(msg);
                         }
-                        else if (packetid_ptr->second == sock_cid::packet_state::sendpubrec)
+                        else if (packetid_ptr->state == sock_cid::packet_state::sendpubrec)
                         {
                             std::array<uint8_t, 4> pubrec;
                             pubrec[0] = PUBREC;
                             pubrec[1] = 2;
-                            pubrec[2] = (packetid_ptr->first >> 8) & 0xFF;
-                            pubrec[3] = packetid_ptr->first & 0xFF;
+                            pubrec[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
+                            pubrec[3] = packetid_ptr->packet_id & 0xFF;
                             esp_tls_conn_write(sockst->tls, pubrec.begin(), 4);
-                            packetid_ptr->second = sock_cid::packet_state::getpubrel;
+                            packetid_ptr->state = sock_cid::packet_state::getpubrel;
                             msg.op = message::operation::read;
                             sendtoque(msg);
                         }
-                        else if (packetid_ptr->second == sock_cid::packet_state::sendpubrel)
+                        else if (packetid_ptr->state == sock_cid::packet_state::sendpubrel)
                         {
                             std::array<uint8_t, 4> pubrel;
                             pubrel[0] = PUBREL;
                             pubrel[1] = 2;
-                            pubrel[2] = (packetid_ptr->first >> 8) & 0xFF;
-                            pubrel[3] = packetid_ptr->first & 0xFF;
+                            pubrel[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
+                            pubrel[3] = packetid_ptr->packet_id & 0xFF;
                             esp_tls_conn_write(sockst->tls, pubrel.begin(), 4);
-                            packetid_ptr->second = sock_cid::packet_state::getpubcomp;
+                            packetid_ptr->state = sock_cid::packet_state::getpubcomp;
                             msg.op = message::operation::read;
                             sendtoque(msg);
                         }
-                        else if (packetid_ptr->second == sock_cid::packet_state::sendpubcomp)
+                        else if (packetid_ptr->state == sock_cid::packet_state::sendpubcomp)
                         {
                             std::array<uint8_t, 4> pubcomp;
                             pubcomp[0] = PUBCOMP;
                             pubcomp[1] = 2;
-                            pubcomp[2] = (packetid_ptr->first >> 8) & 0xFF;
-                            pubcomp[3] = packetid_ptr->first & 0xFF;
+                            pubcomp[2] = (packetid_ptr->packet_id >> 8) & 0xFF;
+                            pubcomp[3] = packetid_ptr->packet_id & 0xFF;
                             esp_tls_conn_write(sockst->tls, pubcomp.begin(), 4);
-                            packetid_ptr->first = 0;
+                            packetid_ptr->packet_id = 0;
                             msg.op = message::operation::read;
                             sendtoque(msg);
                         }
-                        else if (packetid_ptr->second == sock_cid::packet_state::sendpublish)
+                        else if (packetid_ptr->state == sock_cid::packet_state::sendpublish)
                         {
-                            Publishhashmap::Node_pubmap *node = publish_msg_store.get(packetid_ptr->first);
-                            packetid_ptr->first=0;
+                            Publishhashmap::Node_pubmap *node = publish_msg_store.get(packetid_ptr->packet_id);
+                            packetid_ptr->packet_id=0;
                             if (node)
                             {
                                 publish(node->data.begin(), node->data.size, node->qos, node->pubpack_id, sockst);

@@ -58,7 +58,12 @@ struct sock_cid
     uint8_t clientid_len;
     phase phs;
     esp_tls_t *tls;
-    myvector<std::pair<uint16_t, packet_state>> packid_state;
+    struct packid_state_item{
+        uint16_t packet_id;
+        packet_state state;
+        uint8_t qos;
+    };
+    myvector<packid_state_item> packid_state;
     sock_cid()
     {
         clientid_len = 0;

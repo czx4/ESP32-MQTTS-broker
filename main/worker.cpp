@@ -112,13 +112,18 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
         return;
     }
     int ret_write = esp_tls_conn_write(sockst->tls, buff_ptr, len);
+    Publishhashmap::Node_pubmap *node = publish_msg_store.get(packet_id);
     if (qos == 0)
     {
+        if(node){
+            if(--node->count == 0){
+                publish_msg_store.erase(packet_id);
+            }
+        }
         return;
     }
     sock_cid::packet_state state_to_add = qos == 1 ? sock_cid::packet_state::getpuback : sock_cid::packet_state::getpubrec;
     add_packet_id(sockst, state_to_add, packet_id);
-    Publishhashmap::Node_pubmap *node = publish_msg_store.get(packet_id);
     if (!node)
     {
         *buff_ptr |= DUPLICATION_FLAG;
@@ -132,15 +137,19 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
 
 void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id, std::array<sock_cid, 64> &sock_to_clientid)
 {
-    if (packet_id == 0)
-    {
-        packet_id = 5; // TODO: in future random
-    }
-    if (!publish_msg_store.add(packet_id, buff_ptr, len, qos))
+    Publishhashmap::Node_pubmap* node = nullptr;
+    if (!publish_msg_store.add(packet_id, buff_ptr, len, qos)){
+        ESP_LOGI(TAG,"failed to add msg to store");
         return;
+    }
+    node = publish_msg_store.get(packet_id);
+    if(!node){
+        ESP_LOGI(TAG,"failed to get the node for msg");
+        return;
+    }
     for (auto &client : client_store)
     {
-        if (client->sock != -1 && client->is_subscribed(topic_ptr, topic_len))
+        if (client->sock != -1 && client->is_subscribed(topic_ptr, topic_len)!=EMPTY_QOS)
         {
             message msg(client->sock, message::operation::delread);
             sendtoque(msg);
@@ -148,6 +157,7 @@ void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr,
             if (sendtoque(msg))
             {
                 add_packet_id(&sock_to_clientid[client->sock], sock_cid::packet_state::sendpublish, packet_id);
+                ++node->count;
             }
             else
             {
@@ -155,6 +165,9 @@ void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr,
                 sendtoque(msg);
             }
         }
+    }
+    if(--node->count==0){
+        publish_msg_store.erase(packet_id);
     }
 }
 
@@ -182,7 +195,7 @@ void worker(void *args)
     {
         while (xQueueReceive(pending_socks, &msg, portMAX_DELAY) == pdPASS)
         {
-            ESP_LOGI(TAG, "got to worker %i", msg.socket);
+            ESP_LOGI(TAG, "got to sock %i", msg.socket);
             if (msg.socket == -1)
                 continue;
             int sock = msg.socket;
@@ -209,6 +222,7 @@ void worker(void *args)
                 {
                     sockst->phs = sock_cid::phase::mqtt;
                     msg.op = message::operation::read;
+                    ESP_LOGI(TAG,"tls done first try on sock: %i",sock);
                     sendtoque(msg);
                     continue;
                 }
@@ -239,6 +253,7 @@ void worker(void *args)
                 {
                     msg.op = message::operation::read;
                     sockst->phs = sock_cid::phase::mqtt;
+                    ESP_LOGI(TAG,"tls done on sock: %i",sock);
                     sendtoque(msg);
                     continue;
                 }
@@ -390,24 +405,23 @@ void worker(void *args)
                 {
                     if ((buf[0] & GET_CONTROL_PACKET_TYPE) == PUBLISH)
                     {
-                        cur_pos = &buf[0];
                         uint8_t packet_qos = 0;
 
-                        if (*cur_pos & DUPLICATION_FLAG)
+                        if (buf[0] & DUPLICATION_FLAG)
                         { // dup flag
                             ESP_LOGI(TAG, "recieved duplicate publish");
                         }
-                        if (*cur_pos & 0x06)
+                        if (buf[0] & 0x06)
                         { // wrong, not allowed as it is reserved
                             ESP_LOGW(TAG, "not allowed");
                             drop_conn(msg, sockst, sock_to_clientid);
                             continue;
                         }
-                        else if (*cur_pos & 0x04)
+                        else if (buf[0] & 0x04)
                         { // qos 2
                             packet_qos = 2;
                         }
-                        else if (*cur_pos & 0x02)
+                        else if (buf[0] & 0x02)
                         { // qos 1
                             packet_qos = 1;
                         }
@@ -416,7 +430,7 @@ void worker(void *args)
                             packet_qos = 0;
                         }
                         bool retain = false;
-                        if (*cur_pos++ & 0x01)
+                        if (buf[0] & 0x01)
                         {
                             retain = true;
                         }
@@ -430,6 +444,9 @@ void worker(void *args)
                         if (packet_qos > 0)
                         {
                             packetid = *reinterpret_cast<uint16_t *>(cur_pos);
+                        }
+                        else{
+                            packetid =static_cast<uint16_t>(esp_random());
                         }
 
                         if (retain)
@@ -755,78 +772,73 @@ void worker(void *args)
                         if (state_pair.first != 0 && (state_pair.second == sock_cid::packet_state::sendpuback || state_pair.second == sock_cid::packet_state::sendpubcomp || state_pair.second == sock_cid::packet_state::sendpubrec || state_pair.second == sock_cid::packet_state::sendpubrel || state_pair.second == sock_cid::packet_state::sendpublish))
                         {
                             packetid_ptr = &state_pair;
-                            break;
                         }
-                    }
-                    if (!packetid_ptr)
-                    {
-                        continue;
-                    }
-                    if (packetid_ptr->second == sock_cid::packet_state::sendpuback)
-                    {
-                        std::array<uint8_t, 4> puback;
-                        puback[0] = PUBACK;
-                        puback[1] = 2;
-                        puback[2] = (packetid_ptr->first >> 8) & 0xFF;
-                        puback[3] = packetid_ptr->first & 0xFF;
-                        esp_tls_conn_write(sockst->tls, puback.begin(), 4);
-                        packetid_ptr->first = 0;
-                        msg.op = message::operation::read;
-                        sendtoque(msg);
-                        continue;
-                    }
-                    else if (packetid_ptr->second == sock_cid::packet_state::sendpubrec)
-                    {
-                        std::array<uint8_t, 4> pubrec;
-                        pubrec[0] = PUBREC;
-                        pubrec[1] = 2;
-                        pubrec[2] = (packetid_ptr->first >> 8) & 0xFF;
-                        pubrec[3] = packetid_ptr->first & 0xFF;
-                        esp_tls_conn_write(sockst->tls, pubrec.begin(), 4);
-                        packetid_ptr->second = sock_cid::packet_state::getpubrel;
-                        msg.op = message::operation::read;
-                        sendtoque(msg);
-                        continue;
-                    }
-                    else if (packetid_ptr->second == sock_cid::packet_state::sendpubrel)
-                    {
-                        std::array<uint8_t, 4> pubrel;
-                        pubrel[0] = PUBREL;
-                        pubrel[1] = 2;
-                        pubrel[2] = (packetid_ptr->first >> 8) & 0xFF;
-                        pubrel[3] = packetid_ptr->first & 0xFF;
-                        esp_tls_conn_write(sockst->tls, pubrel.begin(), 4);
-                        packetid_ptr->second = sock_cid::packet_state::getpubcomp;
-                        msg.op = message::operation::read;
-                        sendtoque(msg);
-                        continue;
-                    }
-                    else if (packetid_ptr->second == sock_cid::packet_state::sendpubcomp)
-                    {
-                        std::array<uint8_t, 4> pubcomp;
-                        pubcomp[0] = PUBCOMP;
-                        pubcomp[1] = 2;
-                        pubcomp[2] = (packetid_ptr->first >> 8) & 0xFF;
-                        pubcomp[3] = packetid_ptr->first & 0xFF;
-                        esp_tls_conn_write(sockst->tls, pubcomp.begin(), 4);
-                        packetid_ptr->first = 0;
-                        msg.op = message::operation::read;
-                        sendtoque(msg);
-                        continue;
-                    }
-                    else if (packetid_ptr->second == sock_cid::packet_state::sendpublish)
-                    {
-                        Publishhashmap::Node_pubmap *node = publish_msg_store.get(packetid_ptr->first);
-                        if (node)
+                        
+                        if (!packetid_ptr)
                         {
-                            publish(node->data.begin(), node->data.size, node->qos, packetid_ptr->first, sockst);
-                            if (--node->count == 0)
-                            {
-                                publish_msg_store.erase(packetid_ptr->first);
-                            }
+                            continue;
                         }
-                        msg.op = message::operation::read;
-                        sendtoque(msg);
+                        if (packetid_ptr->second == sock_cid::packet_state::sendpuback)
+                        {
+                            std::array<uint8_t, 4> puback;
+                            puback[0] = PUBACK;
+                            puback[1] = 2;
+                            puback[2] = (packetid_ptr->first >> 8) & 0xFF;
+                            puback[3] = packetid_ptr->first & 0xFF;
+                            esp_tls_conn_write(sockst->tls, puback.begin(), 4);
+                            packetid_ptr->first = 0;
+                            msg.op = message::operation::read;
+                            sendtoque(msg);
+                        }
+                        else if (packetid_ptr->second == sock_cid::packet_state::sendpubrec)
+                        {
+                            std::array<uint8_t, 4> pubrec;
+                            pubrec[0] = PUBREC;
+                            pubrec[1] = 2;
+                            pubrec[2] = (packetid_ptr->first >> 8) & 0xFF;
+                            pubrec[3] = packetid_ptr->first & 0xFF;
+                            esp_tls_conn_write(sockst->tls, pubrec.begin(), 4);
+                            packetid_ptr->second = sock_cid::packet_state::getpubrel;
+                            msg.op = message::operation::read;
+                            sendtoque(msg);
+                        }
+                        else if (packetid_ptr->second == sock_cid::packet_state::sendpubrel)
+                        {
+                            std::array<uint8_t, 4> pubrel;
+                            pubrel[0] = PUBREL;
+                            pubrel[1] = 2;
+                            pubrel[2] = (packetid_ptr->first >> 8) & 0xFF;
+                            pubrel[3] = packetid_ptr->first & 0xFF;
+                            esp_tls_conn_write(sockst->tls, pubrel.begin(), 4);
+                            packetid_ptr->second = sock_cid::packet_state::getpubcomp;
+                            msg.op = message::operation::read;
+                            sendtoque(msg);
+                        }
+                        else if (packetid_ptr->second == sock_cid::packet_state::sendpubcomp)
+                        {
+                            std::array<uint8_t, 4> pubcomp;
+                            pubcomp[0] = PUBCOMP;
+                            pubcomp[1] = 2;
+                            pubcomp[2] = (packetid_ptr->first >> 8) & 0xFF;
+                            pubcomp[3] = packetid_ptr->first & 0xFF;
+                            esp_tls_conn_write(sockst->tls, pubcomp.begin(), 4);
+                            packetid_ptr->first = 0;
+                            msg.op = message::operation::read;
+                            sendtoque(msg);
+                        }
+                        else if (packetid_ptr->second == sock_cid::packet_state::sendpublish)
+                        {
+                            Publishhashmap::Node_pubmap *node = publish_msg_store.get(packetid_ptr->first);
+                            packetid_ptr->first=0;
+                            if (node)
+                            {
+                                publish(node->data.begin(), node->data.size, node->qos, node->pubpack_id, sockst);
+                            }else{
+                                ESP_LOGI(TAG,"sock %i didnt find pub msg",sock);
+                            }
+                            msg.op = message::operation::read;
+                            sendtoque(msg);
+                        }
                     }
                 }
             }

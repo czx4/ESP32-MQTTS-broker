@@ -1,7 +1,7 @@
 #include "main.hpp"
 
 static constexpr const char *TAG = "main";
-constexpr static uint32_t TASK_SIZE = 20 * 1024;
+constexpr static uint32_t TASK_SIZE = 10 * 1024;
 
 QueueHandle_t pending_socks, socks_for_fds;
 

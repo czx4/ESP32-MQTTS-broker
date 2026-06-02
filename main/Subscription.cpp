@@ -7,22 +7,22 @@ uint8_t Subscription::add_sub(char *topic_ptr, std::size_t len, Subscription *cu
     while (len > 0)
     {
         char *end = topic_ptr;
-        while (end < topic_ptr + len - 1 && *end != '/')
+        while (end < topic_ptr + len && *end!='/')
             ++end;
-        len -= ((1 + end) - topic_ptr); // 1 accounting for the 1 added at the end of while
-        Subscription *tmp = cur_node->m_child_nodes.get(topic_ptr, end - topic_ptr);
-        if (!tmp)
+        len -= (end - topic_ptr);
+        Subscription * tmp = cur_node->m_child_nodes.get(topic_ptr,end - topic_ptr);
+        if(!tmp)
         {
-            tmp = alloc();
-            if (!tmp)
+            tmp=alloc();
+            if(!tmp)
                 return SUB_ERROR_CODE;
-            cur_node->m_child_nodes.add(topic_ptr, end - topic_ptr, std::unique_ptr<Subscription>(tmp));
+            cur_node->m_child_nodes.add(topic_ptr,end-topic_ptr,std::unique_ptr<Subscription>(tmp));
             tmp = cur_node->m_child_nodes.get(topic_ptr, end - topic_ptr);
-            if (!tmp)
+            if(!tmp)
                 return SUB_ERROR_CODE;
         }
         cur_node = tmp;
-        topic_ptr = end + 1;
+        topic_ptr=end;
     }
     cur_node->m_max_qos = qos;
     return qos;
@@ -30,17 +30,16 @@ uint8_t Subscription::add_sub(char *topic_ptr, std::size_t len, Subscription *cu
 
 uint8_t Subscription::is_subed_to(char *topic_ptr, std::size_t len, Subscription *cur_node)
 {
-
     while (len > 0)
     {
         char *end = topic_ptr;
         while (end < topic_ptr + len && *end != '/')
             ++end;
-        len -= (1 + end) - topic_ptr; // 1 accounting for the 1 added at the end of while
+        len -= (end - topic_ptr);
         cur_node = cur_node->m_child_nodes.get(topic_ptr, end - topic_ptr);
         if (!cur_node)
             return EMPTY_QOS;
-        topic_ptr = end + 1;
+        topic_ptr=end;
     }
     return cur_node->m_max_qos;
 }
@@ -92,8 +91,7 @@ void Subscription::delete_sub(char *topic_ptr, std::size_t len, Subscription *cu
             del_topic_ptr = topic_ptr;
             del_topic_len = subtopic_len;
         }
-        topic_ptr = end + 1;
-        len -= 1;
+        topic_ptr = end;
     }
 }
 

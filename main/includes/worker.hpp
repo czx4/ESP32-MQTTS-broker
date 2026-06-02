@@ -23,6 +23,9 @@ constexpr uint8_t PUBCOMP = 0x70;
 constexpr uint8_t PUBACK = 0x40;
 constexpr uint8_t DUPLICATION_FLAG = 0x08;
 
+
+static constexpr uint8_t EMPTY_QOS = 255;
+
 enum mqtt_conn_return
 {
     disconnect,

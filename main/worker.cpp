@@ -77,7 +77,10 @@ void publish(uint8_t *buff_ptr, std::size_t len, uint8_t qos, uint16_t packet_id
         }
         return;
     }
+    uint8_t tmp_old_qos_holder=*buff_ptr;
+    *buff_ptr = (*buff_ptr & ~(0b111)) | ((qos & 0b11)<<1); // setting qos in buffer to the given one and clearing potential retain flag
     int ret_write = esp_tls_conn_write(sockst->tls, buff_ptr, len);
+    *buff_ptr = tmp_old_qos_holder;
     Publishhashmap::Node_pubmap *node = publish_msg_store.get(packet_id);
     if (qos == 0)
     {
@@ -120,8 +123,9 @@ void publish_by_topic(char *topic_ptr, std::size_t topic_len, uint8_t *buff_ptr,
             uint8_t client_qos = client->is_subscribed(topic_ptr, topic_len);
             if(client_qos == EMPTY_QOS)
                 continue;
-            if(client_qos>qos)
-                client_qos=qos;
+            if(client_qos > qos){
+                client_qos = qos;
+            }
             message msg(client->sock, message::operation::delread);
             sendtoque(msg);
             msg.op = message::operation::write;
@@ -838,7 +842,7 @@ void worker(void *args)
                             packetid_ptr->packet_id=0;
                             if (node)
                             {
-                                publish(node->data.begin(), node->data.size, node->qos, node->pubpack_id, sockst);
+                                publish(node->data.begin(), node->data.size, packetid_ptr->qos, node->pubpack_id, sockst);
                             }else{
                                 ESP_LOGI(TAG,"sock %i didnt find pub msg",sock);
                             }

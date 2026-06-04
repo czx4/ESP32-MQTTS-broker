@@ -175,14 +175,14 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(wifi_init_sta());
 #ifdef CONFIG_EXAMPLE_IPV4
-    pending_socks = xQueueCreate(50, sizeof(message)); // TODO: adjust size
-    socks_for_fds = xQueueCreate(50, sizeof(message)); // TODO: adjust size
+    pending_socks = xQueueCreate(50, sizeof(message)); 
+    socks_for_fds = xQueueCreate(50, sizeof(message)); 
     if (!pending_socks || !socks_for_fds)
     {
         ESP_LOGW(TAG, "failed to create queue");
         esp_restart();
     }
-    xTaskCreate(tcp_server_task, "tcp_server", 6 * 1024, (void *)AF_INET, 0, NULL); // TODO: adjust size
+    xTaskCreate(tcp_server_task, "tcp_server", 6 * 1024, (void *)AF_INET, 0, NULL); 
     xTaskCreate(worker, "worker", TASK_SIZE, NULL, 0, NULL);
 #endif
 }

@@ -62,6 +62,7 @@ struct sock_cid
         uint16_t packet_id;
         packet_state state;
         uint8_t qos;
+        bool delete_retain;
     };
     myvector<packid_state_item> packid_state;
     sock_cid()

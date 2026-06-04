@@ -20,15 +20,9 @@ private:
     bool retry_send(uint8_t *buffer_pointer, std::size_t length, std::array<uint8_t, 4> &resp_buff, uint8_t check_flag, uint16_t packetid);
 
 public:
-    enum state
-    {
-        ready,
-        read_que,
-    };
-    uint16_t qued_msg_pack_id = 0;
+    bool has_qued_msgs = false;
     int sock = -1;
     bool clean_session = true;
-    state client_state = state::ready;
 
     struct Will
     {

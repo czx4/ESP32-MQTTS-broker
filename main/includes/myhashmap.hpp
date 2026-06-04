@@ -131,12 +131,14 @@ public:
 
         Iterator &operator++()
         {
+            ESP_LOGI("Hashmap","++iterator mapsize: %i",map->capacity);
             if (!m_ptr || !m_ptr->next.get())
             {
-                while (cur_id < map->size && map->operator[](cur_id).get() == nullptr)
+                ++cur_id;
+                while (cur_id < map->capacity && map->operator[](cur_id).get() == nullptr)
                     ++cur_id;
-
-                if (cur_id >= map->size)
+                
+                if (cur_id == map->capacity)
                 {
                     m_ptr = nullptr;
                     return *this;
@@ -177,7 +179,7 @@ public:
         }
         return end();
     }
-    Iterator end() { return Iterator(nullptr, this->map.size, &this->map); }
+    Iterator end() { return Iterator(nullptr, this->map.capacity, &this->map); }
 
     myhashmap(std::size_t reserve_capacity);
 
@@ -279,6 +281,7 @@ bool myhashmap<T>::add(char *topic_ptr, std::size_t len, T &&data)
     Node *ptr = map[id].get();
     if (!ptr)
     {
+        ++count;
         map[id].reset(new_node_ptr);
     }
     else
@@ -332,6 +335,7 @@ void myhashmap<T>::erase(char *topic_ptr, std::size_t len)
     if (ptr->key.equal(topic_ptr, len))
     {
         map[id] = std::move(ptr->next);
+        --count;
         return;
     }
     while (ptr->next.get() && !ptr->next.get()->key.equal(topic_ptr, len))

@@ -8,7 +8,7 @@ The broker can store one retained message per subject, supports wildcards, every
 Broker can handle up to 64 concurrent clients, if enough memory is provided. If you want to adjust the initial size of hashmap containing clients, publish message information or queuing timeout it can be done in worker.cpp file. 
 
 **- WI-FI Settings**
-As the broker currently only works on WI-FI (AP capabilities to be added in future), some setting need to be set before using the broker. IP address, netmask address and gateway address can be set in includes/wificonfig.hpp. Credentials needed to connect to WI-FI can be set in includes/wificredentials.hpp. None of the strings need to be null terminated. As of now the broker only supports ipv4.
+As the broker currently only works on WI-FI (AP capabilities to be added in future), some settings need to be set before using the broker. IP address, netmask address and gateway address can be set in includes/wificonfig.hpp. Credentials needed to connect to WI-FI can be set in includes/wificredentials.hpp. None of the strings need to be null terminated. As of now the broker only supports ipv4.
 
 **- TLS Settings**
 In order to get TLS working, private key and X.509 certificate need to be generated and provided as C literals in includes/certs.hpp file, the literals

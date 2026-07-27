@@ -6,7 +6,8 @@ The broker can store one retained message per subject, supports wildcards, every
 
 **- General Settings**
 
-Broker can handle up to 64 concurrent clients, if enough memory is provided. If you want to adjust the initial size of hashmap containing clients, publish message information or queuing timeout it can be done in worker.cpp file. 
+Broker can handle up to 64 concurrent clients, if enough memory is provided.
+If you want to adjust the initial size of hashmap containing clients, publish message information, queuing timeout or max message buffer size for receiving messages, it can be done in worker.cpp file through editing the constants at the top of the file.
 
 **- WI-FI Settings**
 
